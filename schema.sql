@@ -46,9 +46,22 @@ CREATE TABLE "aux_groups" (
   PRIMARY KEY ("uid", "gid")
 );
 
--- prevent creation/update of a user if the number of users
+-- prevent creation/update of a user/host if the number of users
 -- in the group 'users' that have that host
 -- is equal to the maxUsers for that host
+create function check_hosts_for_hosts() returns trigger
+    language plpgsql as $$
+    begin
+        if ((select count(*) from passwd where passwd.host = new.name) <= new.maxusers) then
+            raise foreign_key_violation using message = 'current maxUsers too high for host: '||new.name;
+        end if;
+        return new;
+    end $$;
+create constraint trigger max_users_on_host
+    after update on hosts
+    for each row
+    when (old.maxusers <> new.maxusers)
+    execute procedure check_hosts_for_hosts();
 create function check_max_users() returns trigger
     language plpgsql as $$
     begin
@@ -61,6 +74,49 @@ create function check_max_users() returns trigger
 create constraint trigger max_users
     after insert or update on passwd
     for each row execute procedure check_max_users();
+
+-- prevent users and groups sharing the same name
+create function check_invalid_name_for_passwd() returns trigger
+    language plpgsql as $$
+    begin
+        if (exists(select 1 from "group" where new.name = name)) then
+            raise check_violation using message = 'group name already exists: '||new.name;
+        end if;
+	return new;
+    end $$;
+create function check_invalid_name_for_group() returns trigger
+    language plpgsql as $$
+    begin
+        if (exists(select 1 from passwd where new.name = name)) then
+            raise check_violation using message = 'username already exists: '||new.name;
+        end if;
+	return new;
+    end $$;
+create constraint trigger check_name_exists_passwd
+    after insert or update on passwd
+    for each row
+    execute procedure check_invalid_name_for_passwd();
+create constraint trigger check_name_exists_group
+    after insert or update on "group"
+    for each row
+    execute procedure check_invalid_name_for_group();
+
+-- prevent users from taking names typically reserved for sysadmins
+CREATE TABLE "banned_usernames" (
+    "name" username_t UNIQUE NOT NULL
+);
+create function check_banned_username() returns trigger
+    language plpgsql as $$
+    begin
+        if (exists(select 1 from banned_usernames where name = new.name)) then
+            raise check_violation using message = 'username banned: '||new.name;
+        end if;
+        return new;
+    end $$;
+create constraint trigger check_banned_username
+    after insert on passwd
+    for each row
+    execute procedure check_banned_username();
 
 -- create role for creating new users
 -- grant only rights to add new users
